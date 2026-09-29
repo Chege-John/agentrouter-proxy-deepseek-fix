@@ -1,8 +1,10 @@
-# AgentRouter Spoof Proxy
+# AgentRouter Proxy: DeepSeek "thinking must be passed back" fix
 
-> **This is a fork.** It is based on [trefeon/agentrouter-spoof-proxy](https://github.com/trefeon/agentrouter-spoof-proxy) (MIT). On top of the original it adds the [DeepSeek reasoning-400 fallback](#reasoning-400-fallback) described below.
+Getting `The content[].thinking in the thinking mode must be passed back to the API` (or the same message naming `reasoning_content`) from DeepSeek models on AgentRouter while using opencode or another tool-calling client? This proxy fixes it.
+
+> **Fork of [trefeon/agentrouter-spoof-proxy](https://github.com/trefeon/agentrouter-spoof-proxy) (MIT)**, adding a [fix for DeepSeek's "thinking must be passed back" 400s](#reasoning-400-fallback).
 >
-> ⚠️ **Use at your own risk.** This project impersonates first-party CLI clients to get past AgentRouter's WAF. That may violate AgentRouter's terms of service, and it can stop working or lead to account restrictions at any time.
+> ⚠️ **Use at your own risk.** This project impersonates first-party CLI clients to get past AgentRouter's WAF. That may violate AgentRouter's terms of service and can stop working or lead to account restrictions at any time.
 
 Cross-platform reverse proxy in Go that bypasses the AgentRouter WAF by spoofing first-party CLI headers (default opencode, see `SPOOF_PROFILE`). Ships as a single static binary with no runtime dependencies. Docker image is about 15 to 25 MB.
 
@@ -81,9 +83,9 @@ Wait 5 seconds if `wafCookie: false`. WAF warmup runs at startup.
 go build -o agentrouter-proxy.exe ./cmd/proxy
 
 # 2. Optional: set env vars for this PowerShell session (defaults are fine to start)
-$env:LOG_LEVEL        = "info"
-$env:THINKING_MODE    = "auto"
-$env:PROXY_AUTH_TOKEN = "choose-a-local-token"   # only if you expose the proxy
+$env:LOG_LEVEL     = "info"
+# auto is already the default, so this line is optional
+$env:THINKING_MODE = "auto"
 
 # 3. Run
 .\agentrouter-proxy.exe
@@ -222,7 +224,7 @@ Dashboard API endpoints (`/api/status`, `/api/config`, `/api/mode`,
 `/api/logs`, `/api/checkin/status`, `/api/checkin/run`) require the proxy auth
 token (Bearer or `X-Proxy-Token`) when `PROXY_AUTH_TOKEN` is set.
 
-## Models
+## Behavior notes
 
 ### Retry behavior and token billing
 
@@ -308,7 +310,7 @@ otherwise reject, not a normal mode of operation.
 **Debugging captures.** `DUMP_400=1` writes the failing request body, the
 upstream response, and the previous successful request under `./debug/`. These
 files contain your prompts and code — see the warning in the configuration table
-below. To rerun the measurement matrix with `tools/replay400`, start the proxy
+above. To rerun the measurement matrix with `tools/replay400`, start the proxy
 with `DISABLE_BREAKER=1` first: the tool no longer sends a per-request breaker
 bypass header, and an open breaker would reject replays with `503`.
 
