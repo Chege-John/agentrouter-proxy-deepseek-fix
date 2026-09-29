@@ -55,6 +55,7 @@ func main() {
 	}
 	slog.Info(fmt.Sprintf("AgentRouter proxy listening on %s:%d, target=%s",
 		cfg.ListenAddr, cfg.ListenPort, cfg.Upstream()))
+	slog.Info(fmt.Sprintf("Thinking mode: %s", cfg.ThinkingMode))
 
 	// Graceful shutdown on SIGINT or SIGTERM. Mirrors proxy.mjs shutdown,
 	// drains active streams and forces exit after 15s.

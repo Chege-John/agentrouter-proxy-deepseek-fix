@@ -50,6 +50,10 @@ type Config struct {
 
 	RetryOn5xx        bool `env:"RETRY_ON_5XX" envDefault:"false"`
 	StripThinkingTags bool `env:"STRIP_THINKING_TAGS" envDefault:"true"`
+	// Dump400 writes the upstream request and response to ./debug when a 400
+	// says reasoning must be passed back. Bodies stay on disk; they are never
+	// logged. Default off.
+	Dump400 bool `env:"DUMP_400" envDefault:"false"`
 
 	ModelsCSV          string `env:"MODELS_CSV" envDefault:"claude-opus-4-8,claude-opus-5,deepseek-v4-flash,glm-5.3,gpt-5.6-sol,gpt-6-astra"`
 	ARAPIKey           string `env:"AR_API_KEY"`
@@ -66,6 +70,9 @@ type Config struct {
 	CheckinWindowEnd   string `env:"CHECKIN_RANDOM_WINDOW_END" envDefault:"22:00"`
 
 	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
+
+	ThinkingMode   string `env:"THINKING_MODE" envDefault:"auto"` // auto|off|on
+	DisableBreaker bool   `env:"DISABLE_BREAKER" envDefault:"false"`
 }
 
 // Load parses env into Config. It does not validate. Call Validate
@@ -112,6 +119,12 @@ func (c *Config) Validate() error {
 			}
 			return auth.IsValidProfile(c.SpoofProfile)
 		}},
+		{"THINKING_MODE", "\"auto\", \"off\" or \"on\"", c.ThinkingMode, func() bool {
+			if strings.TrimSpace(c.ThinkingMode) == "" {
+				return true // empty falls back to auto default
+			}
+			return c.ThinkingMode == "auto" || c.ThinkingMode == "off" || c.ThinkingMode == "on"
+		}},
 	}
 	for _, ch := range checks {
 		if !ch.ok() {
@@ -131,6 +144,16 @@ func normalizeSpoofProfile(p string) string {
 // It maps aliases to their canonical form via auth.NormalizeProfile.
 func (c *Config) NormalizedSpoofProfile() string {
 	return auth.NormalizeProfile(c.SpoofProfile)
+}
+
+// NormalizedThinkingMode returns the canonical thinking mode (auto, off, on).
+func (c *Config) NormalizedThinkingMode() string {
+	switch c.ThinkingMode {
+	case "off", "on":
+		return c.ThinkingMode
+	default:
+		return "auto"
+	}
 }
 
 // Upstream returns "host:port" for the /health payload.

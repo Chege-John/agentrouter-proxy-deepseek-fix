@@ -37,6 +37,9 @@ func TestLoadDefaults(t *testing.T) {
 	if !c.StripThinkingTags {
 		t.Error("StripThinkingTags default should be true")
 	}
+	if c.Dump400 {
+		t.Error("Dump400 default should be false")
+	}
 	if c.ARAPIKey != "" {
 		t.Errorf("ARAPIKey = %q, want empty", c.ARAPIKey)
 	}
@@ -57,6 +60,7 @@ func TestLoadExplicit(t *testing.T) {
 	t.Setenv("MAX_RETRIES", "5")
 	t.Setenv("RETRY_ON_5XX", "true")
 	t.Setenv("STRIP_THINKING_TAGS", "false")
+	t.Setenv("DUMP_400", "1")
 	t.Setenv("AR_API_KEY", "sk-test-key")
 	t.Setenv("PROXY_AUTH_TOKEN", "secret")
 
@@ -75,6 +79,9 @@ func TestLoadExplicit(t *testing.T) {
 	}
 	if c.StripThinkingTags {
 		t.Error("StripThinkingTags should be false")
+	}
+	if !c.Dump400 {
+		t.Error("Dump400 should be true")
 	}
 	if c.ARAPIKey != "sk-test-key" || c.ProxyAuthToken != "secret" {
 		t.Errorf("keys not parsed: api=%q token=%q", c.ARAPIKey, c.ProxyAuthToken)
@@ -166,7 +173,7 @@ func clearEnv(t *testing.T) func() {
 		"LISTEN_PORT", "LISTEN_ADDRESS", "TARGET_PROTOCOL", "TARGET_HOST", "TARGET_PORT",
 		"REQUEST_TIMEOUT_MS", "RESPONSE_TIMEOUT_MS", "SSE_IDLE_TIMEOUT_MS", "SSE_CHUNK_TIMEOUT_MS",
 		"BODY_UPLOAD_TIMEOUT_MS", "SLOW_RESPONSE_MS", "WARMUP_INTERVAL_MS", "DISCOVERY_INTERVAL_MS",
-		"MAX_RETRIES", "RETRY_DELAY_MS", "RETRY_ON_5XX", "STRIP_THINKING_TAGS",
+		"MAX_RETRIES", "RETRY_DELAY_MS", "RETRY_ON_5XX", "STRIP_THINKING_TAGS", "DUMP_400",
 		"MODELS_CSV", "AR_API_KEY", "INJECT_SYSTEM_PROMPT", "PROXY_AUTH_TOKEN", "LOG_LEVEL",
 		"EXPOSURE_MODE", "CHECKIN_CMD", "CHECKIN_ARGS", "CHECKIN_WORKDIR", "CHECKIN_SCHEDULE",
 		"CHECKIN_RANDOM_WINDOW_START", "CHECKIN_RANDOM_WINDOW_END",

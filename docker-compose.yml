@@ -38,6 +38,11 @@ services:
       - SLOW_RESPONSE_MS=${SLOW_RESPONSE_MS:-30000}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SPOOF_PROFILE=${SPOOF_PROFILE:-opencode}
+      # DeepSeek reasoning-400 fallback (see README). auto | on | off.
+      - THINKING_MODE=${THINKING_MODE:-auto}
+      # Optional debug/diagnostic toggles. Keep DISABLE_BREAKER off in production.
+      - DUMP_400=${DUMP_400:-false}
+      - DISABLE_BREAKER=${DISABLE_BREAKER:-false}
       # Optional inbound auth token. Recommended whenever the proxy is exposed
       # beyond localhost or the private Docker network.
       - PROXY_AUTH_TOKEN=${PROXY_AUTH_TOKEN:-}

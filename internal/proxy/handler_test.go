@@ -663,3 +663,49 @@ func TestHandlerClientDisconnect(t *testing.T) {
 		t.Errorf("unexpected response status %d written for disconnected client", rec.Code)
 	}
 }
+
+// TestBreakerHeaderCannotDisableBreaker locks in that no request header can
+// switch the circuit breaker off: an open breaker must still reject with 503.
+func TestBreakerHeaderCannotDisableBreaker(t *testing.T) {
+	cfg := testUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	h, _, breaker, _, _ := testHandler(cfg)
+	for i := 0; i < 5; i++ {
+		breaker.RecordFailure()
+	}
+	if !breaker.IsOpen() {
+		t.Fatal("breaker should be open after 5 failures")
+	}
+	rec := proxyRequest(t, h, http.MethodPost, "/v1/chat/completions", `{"model":"m1"}`, map[string]string{
+		"X-Proxy-Disable-Breaker": "true",
+	})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 circuit_open with header set, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "circuit_open") {
+		t.Errorf("expected circuit_open body, got %s", rec.Body.String())
+	}
+}
+
+// TestDisableBreakerEnvBypassesOpenCircuit verifies DISABLE_BREAKER is the only
+// way to skip the open-circuit rejection.
+func TestDisableBreakerEnvBypassesOpenCircuit(t *testing.T) {
+	cfg := testUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	cfg.DisableBreaker = true
+	h, _, breaker, _, _ := testHandler(cfg)
+	for i := 0; i < 5; i++ {
+		breaker.RecordFailure()
+	}
+	if !breaker.IsOpen() {
+		t.Fatal("breaker should be open after 5 failures")
+	}
+	rec := proxyRequest(t, h, http.MethodPost, "/v1/chat/completions", `{"model":"m1"}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with DISABLE_BREAKER set, got %d", rec.Code)
+	}
+}

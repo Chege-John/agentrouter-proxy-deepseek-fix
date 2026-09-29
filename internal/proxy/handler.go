@@ -59,6 +59,10 @@ type Handler struct {
 	Active    *atomic.Int64
 	Log       *slog.Logger
 	Logs      *logstore.Store
+
+	// dumps retains the last HTTP 200 body when DUMP_400 is on, so a later
+	// "must be passed back" 400 can be saved next to that previous success.
+	dumps passbackDump
 }
 
 // NewHandler wires the injected dependencies into a Handler.
@@ -166,7 +170,14 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 
 	body = InjectPrompt(body, path, h.Cfg.InjectSystemPrompt)
 
-	if h.Breaker.IsOpen() {
+	shape := ShapeAndFixReasoning(body, path)
+	h.Log.Info(fmt.Sprintf("REQ SHAPE %s", shape))
+
+	if h.Cfg.NormalizedThinkingMode() == "off" && strings.HasPrefix(path, "/v1/chat/completions") && strings.Contains(strings.ToLower(model), "deepseek") {
+		body = AddThinkingDisabled(body)
+	}
+
+	if !h.isBreakerDisabled() && h.Breaker.IsOpen() {
 		h.Log.Info(fmt.Sprintf("%s %s -> REJECTED (circuit open)", method, rawPath))
 		h.logEntry(logstore.Entry{Time: time.Now(), Level: logstore.LevelError, Path: rawPath, Format: string(streamFormat), Status: http.StatusServiceUnavailable, Error: "circuit_open"})
 		h.respondJSON(w, http.StatusServiceUnavailable, errorBody("circuit_open", "Upstream circuit breaker open, retry later"))
@@ -325,6 +336,7 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 
 	adaptiveTimeout := ResponseTimeout(len(body), h.Cfg.ResponseTimeoutMs)
 
+	fallbackAttempt := 0
 	for attempt := 0; ; attempt++ {
 		if reqCtx.Err() != nil {
 			return // client gone
@@ -364,13 +376,39 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 		// still record. ResponseHasEmptyOutput only fires on 200, so an exempt
 		// hit leaves zero health marks by construction.
 		noPenalty := false
+		var respRaw []byte
 		if (status >= 500 && status <= 599) || status == http.StatusPaymentRequired || status == http.StatusBadRequest {
 			raw, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			if readErr == nil && (IsContentFilterRejection(status, raw) || IsAccountSideRejection(status, raw)) {
-				noPenalty = true
+			if readErr == nil {
+				respRaw = raw
+				if IsContentFilterRejection(status, raw) || IsAccountSideRejection(status, raw) {
+					noPenalty = true
+				}
 			}
 			resp.Body = io.NopCloser(bytes.NewReader(raw))
+		}
+
+		if status == http.StatusBadRequest && strings.Contains(string(respRaw), "must be passed back") && strings.HasPrefix(path, "/v1/chat/completions") {
+			noPenalty = true
+			h.dumpPassedBack400(body, respRaw, attempt+1, path)
+			if fallbackAttempt == 0 {
+				fallbackAttempt = 1
+				h.Log.Info("REASONING FALLBACK: retry as-is")
+				if !sleepCtx(reqCtx, RetryDelay(attempt, h.Cfg.RetryDelayMs)) {
+					return
+				}
+				continue
+			} else if fallbackAttempt == 1 && h.Cfg.NormalizedThinkingMode() != "on" {
+				fallbackAttempt = 2
+				body = AddThinkingDisabled(body)
+				adaptiveTimeout = ResponseTimeout(len(body), h.Cfg.ResponseTimeoutMs)
+				h.Log.Info("REASONING FALLBACK: retrying with thinking disabled")
+				if !sleepCtx(reqCtx, RetryDelay(attempt, h.Cfg.RetryDelayMs)) {
+					return
+				}
+				continue
+			}
 		}
 
 		// 5xx retry, if exhausted, mark model unhealthy.
@@ -396,9 +434,9 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 		// 429 → neither (model lockout only), 4xx → neither, <400 → success.
 		// Content-filter and account-side rejections → neither (deterministic,
 		// handled by the caller).
-		if status >= 500 && !noPenalty {
+		if status >= 500 && !noPenalty && !h.isBreakerDisabled() {
 			h.Breaker.RecordFailure()
-		} else if status < 400 {
+		} else if status < 400 && !h.isBreakerDisabled() {
 			h.Breaker.RecordSuccess()
 		}
 
@@ -419,6 +457,8 @@ func (h *Handler) doRequest(w http.ResponseWriter, r *http.Request, body []byte,
 			h.forwardNon200(w, r, resp, model, status, filtered, respStart, streamFormat)
 			return
 		}
+
+		h.rememberOKBody(body)
 
 		// 200 response: stream via PumpSSE for SSE, plain copy otherwise.
 		h.Log.Debug(fmt.Sprintf("%s %s <- TTFB %dms, status 200, SSE=%v",
@@ -501,7 +541,9 @@ func (h *Handler) handleTransportError(w http.ResponseWriter, r *http.Request, m
 		return false
 	}
 
-	h.Breaker.RecordFailure()
+	if !h.isBreakerDisabled() {
+		h.Breaker.RecordFailure()
+	}
 	h.Health.MarkFailed(model, 503)
 	h.Log.Info(fmt.Sprintf("%s %s -> ERROR: %s (final)", method, rawPath, msg))
 
@@ -559,7 +601,9 @@ func (h *Handler) handleWafResponse(w http.ResponseWriter, r *http.Request, resp
 	_ = resp.Body.Close()
 	if readErr != nil {
 		// Upstream died mid-body; treat like a transport failure of this attempt.
-		h.Breaker.RecordFailure()
+		if !h.isBreakerDisabled() {
+			h.Breaker.RecordFailure()
+		}
 		h.Log.Info(fmt.Sprintf("%s %s -> ERROR: %s (final)", method, rawPath, readErr))
 		h.Recorder.Result(model, models.ResultArgs{StatusCode: http.StatusBadGateway, Error: "upstream_response_error"})
 		h.logEntry(logstore.Entry{Time: time.Now(), Level: logstore.LevelError, Path: rawPath, Model: model, Format: string(streamFormat), Status: http.StatusBadGateway, Error: "upstream_response_error"})
@@ -758,4 +802,11 @@ func (h *Handler) writeFull(w http.ResponseWriter, status int, headers http.Head
 	if len(body) > 0 {
 		_, _ = w.Write(body)
 	}
+}
+
+// isBreakerDisabled reports whether the circuit breaker is disabled. It is
+// controlled solely by the DISABLE_BREAKER env config; no request header can
+// turn the breaker off (a client must not be able to defeat it).
+func (h *Handler) isBreakerDisabled() bool {
+	return h.Cfg.DisableBreaker
 }
