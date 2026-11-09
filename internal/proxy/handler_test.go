@@ -709,3 +709,47 @@ func TestDisableBreakerEnvBypassesOpenCircuit(t *testing.T) {
 		t.Fatalf("expected 200 with DISABLE_BREAKER set, got %d", rec.Code)
 	}
 }
+
+func TestHandlerResponsesSanitization(t *testing.T) {
+	var upstreamBody []byte
+	var upstreamContentLength int64
+	cfg := testUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamContentLength = r.ContentLength
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	h, _, _, _, _ := testHandler(cfg)
+	reqBody := `{"model":"m1","store":true,"include":["reasoning.encrypted_content"],"previous_response_id":"resp_1","input":[{"type":"reasoning","id":"rs_1","encrypted_content":"secret"},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"fn"},{"type":"function_call_output","call_id":"call_1","output":"done"}]}`
+	rec := proxyRequest(t, h, http.MethodPost, "/v1/responses", reqBody, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if upstreamContentLength != int64(len(upstreamBody)) {
+		t.Errorf("ContentLength = %d, len(body) = %d", upstreamContentLength, len(upstreamBody))
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(upstreamBody, &parsed); err != nil {
+		t.Fatalf("unmarshal upstream body: %v", err)
+	}
+	if parsed["store"] != false {
+		t.Errorf("store = %v, want false", parsed["store"])
+	}
+	if _, has := parsed["include"]; has {
+		t.Error("include should be removed")
+	}
+	if _, has := parsed["previous_response_id"]; has {
+		t.Error("previous_response_id should be removed")
+	}
+	input, _ := parsed["input"].([]any)
+	if len(input) != 2 {
+		t.Fatalf("len(input) = %d, want 2", len(input))
+	}
+	fc := input[0].(map[string]any)
+	if _, has := fc["id"]; has {
+		t.Error("fc id should be removed")
+	}
+	if fc["call_id"] != "call_1" {
+		t.Errorf("fc call_id = %v, want call_1", fc["call_id"])
+	}
+}

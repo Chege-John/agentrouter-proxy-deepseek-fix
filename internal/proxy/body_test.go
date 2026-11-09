@@ -281,3 +281,109 @@ func TestInjectPrompt(t *testing.T) {
 	})
 }
 
+func TestSanitizeResponsesBody(t *testing.T) {
+	t.Run("non-responses path untouched", func(t *testing.T) {
+		raw := []byte(`{"store":true,"previous_response_id":"resp_1","include":["reasoning.encrypted_content"]}`)
+		if got := SanitizeResponsesBody(raw, "/v1/chat/completions"); string(got) != string(raw) {
+			t.Errorf("got %s, want unchanged", got)
+		}
+	})
+	t.Run("empty or invalid JSON untouched", func(t *testing.T) {
+		if got := SanitizeResponsesBody(nil, "/v1/responses"); got != nil {
+			t.Errorf("got %q, want nil", got)
+		}
+		raw := []byte(`{not json`)
+		if got := SanitizeResponsesBody(raw, "/v1/responses"); string(got) != string(raw) {
+			t.Errorf("got %s, want unchanged", got)
+		}
+	})
+	t.Run("sanitizes top-level fields and input items while preserving call_id", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "gpt-5",
+			"store": true,
+			"include": ["reasoning.encrypted_content"],
+			"previous_response_id": "resp_abc123",
+			"reasoning": {"effort": "high", "summary": "auto"},
+			"input": [
+				{
+					"type": "message",
+					"id": "msg_1",
+					"status": "completed",
+					"role": "assistant",
+					"content": [
+						{"type": "output_text", "id": "txt_1", "text": "hello"},
+						{"type": "input_text", "id": "txt_2", "text": "world"}
+					]
+				},
+				{"type": "reasoning", "id": "rs_1", "encrypted_content": "enc_123", "summary": []},
+				{"type": "function_call", "id": "fc_1", "status": "completed", "call_id": "call_99", "name": "do_work", "arguments": "{}"},
+				{"type": "function_call_output", "id": "fco_1", "call_id": "call_99", "output": "ok", "encrypted_content": "enc_456"}
+			]
+		}`)
+		got := asMap(t, SanitizeResponsesBody(raw, "/v1/responses"))
+		if store, ok := got["store"].(bool); !ok || store != false {
+			t.Errorf("store = %v, want false", got["store"])
+		}
+		if _, has := got["include"]; has {
+			t.Errorf("include should be deleted, got %v", got["include"])
+		}
+		if _, has := got["previous_response_id"]; has {
+			t.Errorf("previous_response_id should be deleted, got %v", got["previous_response_id"])
+		}
+		if _, has := got["reasoning"]; has {
+			t.Errorf("reasoning with summary should be deleted, got %v", got["reasoning"])
+		}
+		input, ok := got["input"].([]any)
+		if !ok || len(input) != 3 {
+			t.Fatalf("input len = %d (ok=%v), want 3 (reasoning item removed)", len(input), ok)
+		}
+		for i, item := range input {
+			m, _ := item.(map[string]any)
+			if m["type"] == "reasoning" {
+				t.Errorf("item %d has type reasoning, should be filtered out", i)
+			}
+			if _, has := m["id"]; has {
+				t.Errorf("item %d still has id: %v", i, m["id"])
+			}
+			if _, has := m["encrypted_content"]; has {
+				t.Errorf("item %d still has encrypted_content: %v", i, m["encrypted_content"])
+			}
+		}
+		msg := input[0].(map[string]any)
+		if _, has := msg["status"]; has {
+			t.Errorf("message item should have status deleted, got %v", msg["status"])
+		}
+		contentBlocks, ok := msg["content"].([]any)
+		if !ok || len(contentBlocks) != 2 {
+			t.Fatalf("message content = %v, want 2 blocks", msg["content"])
+		}
+		for i, blk := range contentBlocks {
+			bm := blk.(map[string]any)
+			if _, has := bm["id"]; has {
+				t.Errorf("content block %d still has id: %v", i, bm["id"])
+			}
+		}
+		fc := input[1].(map[string]any)
+		fco := input[2].(map[string]any)
+		if fc["call_id"] != "call_99" || fco["call_id"] != "call_99" {
+			t.Errorf("call_id was not preserved: fc=%v fco=%v", fc["call_id"], fco["call_id"])
+		}
+	})
+	t.Run("deletes reasoning when thinking mode is off or effort is none", func(t *testing.T) {
+		rawEffortHigh := []byte(`{"model":"gpt-5","reasoning":{"effort":"high"}}`)
+		gotOff := asMap(t, SanitizeResponsesBody(rawEffortHigh, "/v1/responses", "off"))
+		if _, has := gotOff["reasoning"]; has {
+			t.Errorf("reasoning should be deleted when thinkingMode is off, got %v", gotOff["reasoning"])
+		}
+		gotAuto := asMap(t, SanitizeResponsesBody(rawEffortHigh, "/v1/responses", "auto"))
+		if _, has := gotAuto["reasoning"]; !has {
+			t.Error("reasoning with effort=high and no summary should be kept when thinkingMode is auto")
+		}
+		rawEffortNone := []byte(`{"model":"gpt-5","reasoning":{"effort":"none"}}`)
+		gotNone := asMap(t, SanitizeResponsesBody(rawEffortNone, "/v1/responses", "auto"))
+		if _, has := gotNone["reasoning"]; has {
+			t.Errorf("reasoning with effort=none should be deleted, got %v", gotNone["reasoning"])
+		}
+	})
+}
+

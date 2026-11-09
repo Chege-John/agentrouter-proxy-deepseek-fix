@@ -155,4 +155,78 @@ func InjectPrompt(raw []byte, path, prompt string) []byte {
 	}
 	return out
 }
+// SanitizeResponsesBody strips stateful Azure OpenAI identifiers from a
+// `/v1/responses` request body so multi-turn requests do not fail with a 400
+// when AgentRouter load-balances across multiple Azure OpenAI resources:
+//  1. Sets `"store": false` at the top level.
+//  2. Deletes `"include"` and `"previous_response_id"` from the top level.
+//  3. Deletes `"reasoning"` from the top level when thinkingMode is `"off"`, or
+//     when `"reasoning"` contains `"summary"` or `"effort": "none"`.
+//  4. In `"input"` (when a slice of objects): removes items with `"type" == "reasoning"`,
+//     deletes `"id"` and `"encrypted_content"` from remaining items (preserving `"call_id"`),
+//     deletes `"status"` on `"message"` items, and strips `"id"` from nested `"content"` blocks.
+//
+// On non-`/v1/responses` paths, empty body, or JSON parse failure, raw is returned unchanged.
+func SanitizeResponsesBody(raw []byte, path string, thinkingMode ...string) []byte {
+	base := strings.SplitN(path, "?", 2)[0]
+	if (base != "/v1/responses" && !strings.HasPrefix(base, "/v1/responses/")) || len(raw) == 0 {
+		return raw
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil || body == nil {
+		return raw
+	}
+	body["store"] = false
+	delete(body, "include")
+	delete(body, "previous_response_id")
+
+	mode := ""
+	if len(thinkingMode) > 0 {
+		mode = strings.ToLower(strings.TrimSpace(thinkingMode[0]))
+	}
+	if mode == "off" {
+		delete(body, "reasoning")
+	} else if rMap, ok := body["reasoning"].(map[string]any); ok {
+		_, hasSummary := rMap["summary"]
+		effort, _ := rMap["effort"].(string)
+		if hasSummary || effort == "none" {
+			delete(body, "reasoning")
+		}
+	}
+
+	if input, ok := body["input"].([]any); ok {
+		filtered := make([]any, 0, len(input))
+		for _, item := range input {
+			obj, isObj := item.(map[string]any)
+			if !isObj {
+				filtered = append(filtered, item)
+				continue
+			}
+			itemType, _ := obj["type"].(string)
+			if itemType == "reasoning" {
+				continue
+			}
+			delete(obj, "id")
+			delete(obj, "encrypted_content")
+			if itemType == "message" {
+				delete(obj, "status")
+			}
+			if contentArr, isArr := obj["content"].([]any); isArr {
+				for _, cItem := range contentArr {
+					if cMap, isMap := cItem.(map[string]any); isMap {
+						delete(cMap, "id")
+					}
+				}
+			}
+			filtered = append(filtered, obj)
+		}
+		body["input"] = filtered
+	}
+
+	out, err := json.Marshal(body)
+	if err != nil {
+		return raw
+	}
+	return out
+}
 

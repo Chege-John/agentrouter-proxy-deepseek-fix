@@ -169,6 +169,7 @@ func (h *Handler) ServeProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body = InjectPrompt(body, path, h.Cfg.InjectSystemPrompt)
+	body = SanitizeResponsesBody(body, path, h.Cfg.NormalizedThinkingMode())
 
 	shape := ShapeAndFixReasoning(body, path)
 	h.Log.Info(fmt.Sprintf("REQ SHAPE %s", shape))
@@ -494,6 +495,7 @@ func (h *Handler) roundTrip(ctx context.Context, method, url string, headers htt
 	if err != nil {
 		return nil, false, err
 	}
+	req.ContentLength = int64(len(body))
 	req.Header = headers
 
 	resp, err := h.Client.Do(req)
